@@ -1,0 +1,82 @@
+name: VPS
+on:
+  workflow_dispatch:
+jobs:
+  secure-vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Generate Secure Password
+        id: generate_password
+        run: |
+          SECURE_PASS=$(openssl rand -base64 16 | tr -d '/+' | cut -c1-12)
+          echo "PASSWORD=$SECURE_PASS" >> $GITHUB_OUTPUT
+          echo "🔐 Generated secure password"
+
+      - name: Create Static Hostname
+        run: |
+          STATIC_NAME="vps-$(date +%Y%m%d-%H%M%S)"
+          echo "STATIC_HOSTNAME=$STATIC_NAME" >> $GITHUB_ENV
+          echo "🏷️ Static hostname: $STATIC_NAME"
+
+      - name: Install & Configure SSH
+        run: |
+          sudo apt update -y
+          sudo apt install -y openssh-server curl
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+          echo "root:${{ steps.generate_password.outputs.PASSWORD }}" | sudo chpasswd
+          echo "PermitRootLogin yes" | sudo tee -a /etc/ssh/sshd_config
+          echo "ClientAliveInterval 60" | sudo tee -a /etc/ssh/sshd_config
+          echo "ClientAliveCountMax 3" | sudo tee -a /etc/ssh/sshd_config
+          sudo service ssh restart
+          echo "✅ SSH configured - user: root"
+
+      - name: Install Tailscale with Persistence
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Create persistent service configuration
+          sudo mkdir -p /etc/systemd/system/tailscaled.service.d
+          sudo tee /etc/systemd/system/tailscaled.service.d/override.conf > /dev/null <<EOF
+          [Service]
+          Restart=always
+          RestartSec=5
+          EOF
+          
+          sudo systemctl daemon-reload
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ env.STATIC_HOSTNAME }} --accept-routes --accept-dns=false --reset
+          
+          # Wait and get IP
+          sleep 10
+          for i in {1..5}; do
+            tsIP=$(tailscale ip -4 2>/dev/null | head -n 1)
+            if [ -n "$tsIP" ]; then
+              echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+              echo "✅ Tailscale IP: $tsIP"
+              break
+            fi
+            echo "⏳ Waiting for IP... attempt $i"
+            sleep 5
+          done
+
+      - name: Display Connection Info
+        run: |
+          echo "========================================"
+          echo "🚀 VPS Deployment Complete!"
+          echo "========================================"
+          echo "🔗 Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          echo "🏷️ Hostname: ${{ env.STATIC_HOSTNAME }}"
+          echo "👤 SSH User: root"
+          echo "🔑 SSH Password: ${{ steps.generate_password.outputs.PASSWORD }}"
+          echo "🛡️ Auto-recovery: ENABLED"
+          echo "🔧 Persistent IP: ENABLED"
+          echo "⏰ Timeout: 6 hours"
+          echo "========================================"
+
+      - name: Keep VPS Alive
+        run: |
+          while true; do
+            echo "[$(date)] VPS running - Hostname: ${{ env.STATIC_HOSTNAME }} | IP: $(tailscale ip -4 2>/dev/null | head -n 1 || echo 'Connecting...')"
+            sleep 300
+          done
